@@ -71,7 +71,110 @@ class JSONTableEditor {
                 this.clearSelection();
             }
         });
+
+        // Event delegation for nested preview clicks (handles dynamically created elements)
+        document.addEventListener('click', (e) => {
+            // Nested preview toggle
+            const nestedPreview = e.target.closest('.nested-preview');
+            if (nestedPreview) {
+                e.stopPropagation();
+                const path = nestedPreview.dataset.path;
+                if (path) {
+                    this.toggleExpand(path);
+                }
+                return;
+            }
+
+            // Delete row button
+            const deleteBtn = e.target.closest('.btn-delete-row');
+            if (deleteBtn) {
+                e.stopPropagation();
+                const arrayPath = deleteBtn.dataset.arrayPath;
+                const rowIndex = parseInt(deleteBtn.dataset.rowIndex);
+                this.deleteRow(arrayPath, rowIndex);
+                return;
+            }
+
+            // Add row button
+            const addBtn = e.target.closest('.btn-add-row');
+            if (addBtn) {
+                e.stopPropagation();
+                const arrayPath = addBtn.dataset.arrayPath;
+                const columnsStr = addBtn.dataset.columns;
+                let columns;
+                try {
+                    columns = JSON.parse(columnsStr);
+                } catch {
+                    // Try to get columns from the table header
+                    const table = addBtn.closest('.nested-table-wrapper')?.querySelector('.embedded-table');
+                    if (table) {
+                        columns = Array.from(table.querySelectorAll('thead th'))
+                            .map(th => th.textContent)
+                            .filter(col => col && col !== '#');
+                    }
+                }
+                if (columns) {
+                    this.addRow(arrayPath, columns);
+                }
+                return;
+            }
+
+            // Export CSV button
+            const exportBtn = e.target.closest('.btn-export-csv');
+            if (exportBtn) {
+                e.stopPropagation();
+                const arrayPath = exportBtn.dataset.arrayPath;
+                const columnsStr = exportBtn.dataset.columns;
+                let columns;
+                try {
+                    columns = JSON.parse(columnsStr);
+                } catch {
+                    const table = exportBtn.closest('.nested-table-wrapper')?.querySelector('.embedded-table');
+                    if (table) {
+                        columns = Array.from(table.querySelectorAll('thead th'))
+                            .map(th => th.textContent)
+                            .filter(col => col && col !== '#');
+                    }
+                }
+                if (columns) {
+                    this.exportTableAsCSV(arrayPath, columns);
+                }
+                return;
+            }
+
+            // Import CSV button
+            const importBtn = e.target.closest('.btn-import-csv');
+            if (importBtn) {
+                e.stopPropagation();
+                const arrayPath = importBtn.dataset.arrayPath;
+                const columnsStr = importBtn.dataset.columns;
+                let columns;
+                try {
+                    columns = JSON.parse(columnsStr);
+                } catch {
+                    const table = importBtn.closest('.nested-table-wrapper')?.querySelector('.embedded-table');
+                    if (table) {
+                        columns = Array.from(table.querySelectorAll('thead th'))
+                            .map(th => th.textContent)
+                            .filter(col => col && col !== '#');
+                    }
+                }
+                if (columns) {
+                    this.triggerCSVImport(arrayPath, columns);
+                }
+                return;
+            }
+        });
+
+        // Event delegation for editable cells in nested content
+        document.addEventListener('blur', (e) => {
+            if (e.target.classList.contains('embedded-value-cell') && e.target.classList.contains('editable')) {
+                this.handleValueEdit(e);
+            }
+        }, true); // Use capture phase
     }
+
+
 
     // File handling
     handleDragOver(e) {
@@ -660,38 +763,295 @@ class JSONTableEditor {
         const pathStr = path.join('.');
         const isNewRow = this.modifiedPaths.has(`${pathStr}.${rowIndex}.__new__`);
 
-        return `
-            <tr data-row-index="${rowIndex}" class="${isNewRow ? 'new-row' : ''}">
-                <td class="row-index">${rowIndex}</td>
-                ${columns.map((col, colIndex) => {
+        // Build the main row
+        let rowHtml = `<tr data-row-index="${rowIndex}" class="${isNewRow ? 'new-row' : ''}">
+            <td class="row-index">${rowIndex}</td>
+            ${columns.map((col, colIndex) => {
             const value = item[col];
             const type = this.getType(value);
             const cellPath = [...path, rowIndex, col].join('.');
             const isModified = this.modifiedPaths.has(cellPath);
+            const isExpanded = this.expandedPaths.has(cellPath);
 
             if (type === 'object' || type === 'array') {
                 const preview = type === 'array'
                     ? `[${value.length}]`
                     : `{${Object.keys(value).length}}`;
                 return `<td class="nested-cell">
-                            <span class="nested-preview ${type}" 
-                                  data-path="${cellPath}"
-                                  title="Click to expand">${preview}</span>
+                        <span class="nested-preview ${type} ${isExpanded ? 'expanded' : ''}" 
+                              data-path="${cellPath}"
+                              title="Click to ${isExpanded ? 'collapse' : 'expand'}">
+                            <svg class="expand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="9 18 15 12 9 6"></polyline>
+                            </svg>
+                            ${preview}
+                        </span>
+                    </td>`;
+            } else {
+                const displayValue = this.formatValue(value, type);
+                return `<td>
+                        <div class="embedded-value-cell editable ${type} ${isModified ? 'modified' : ''}" 
+                             contenteditable="true" 
+                             data-path="${cellPath}" 
+                             data-type="${type}"
+                             data-row="${rowIndex}"
+                             data-col="${colIndex}">${this.escapeHtml(displayValue)}</div>
+                    </td>`;
+            }
+        }).join('')}
+            <td class="row-actions">
+                <button class="btn-delete-row" data-array-path="${pathStr}" data-row-index="${rowIndex}" title="Delete row">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="3 6 5 6 21 6"></polyline>
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                    </svg>
+                </button>
+            </td>
+        </tr>`;
+
+        // Add expansion rows for any expanded nested items
+        columns.forEach((col, colIndex) => {
+            const value = item[col];
+            const type = this.getType(value);
+            const cellPath = [...path, rowIndex, col].join('.');
+
+            if ((type === 'object' || type === 'array') && this.expandedPaths.has(cellPath)) {
+                rowHtml += this.renderNestedExpansionRow(value, cellPath, columns.length);
+            }
+        });
+
+        return rowHtml;
+    }
+
+    renderNestedExpansionRow(value, cellPath, colSpan) {
+        const type = this.getType(value);
+
+        // Check if it's a homogeneous array of objects - render as table
+        if (type === 'array' && this.isHomogeneousObjectArray(value)) {
+            const nestedColumns = this.getCommonKeys(value);
+            const columnsJson = JSON.stringify(nestedColumns).replace(/"/g, '&quot;');
+
+            return `
+                <tr class="nested-expansion-row">
+                    <td colspan="${colSpan + 2}" class="nested-expansion-cell">
+                        <div class="nested-content">
+                            <div class="nested-table-wrapper" data-array-path="${cellPath}">
+                                <div class="table-toolbar nested-toolbar">
+                                    <div class="toolbar-left">
+                                        <button class="btn-csv btn-export-csv" data-array-path="${cellPath}" data-columns="${columnsJson}" title="Export to CSV">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                                <polyline points="7 10 12 15 17 10"></polyline>
+                                                <line x1="12" y1="15" x2="12" y2="3"></line>
+                                            </svg>
+                                            Export CSV
+                                        </button>
+                                        <button class="btn-csv btn-import-csv" data-array-path="${cellPath}" data-columns="${columnsJson}" title="Import from CSV">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                                <polyline points="17 8 12 3 7 8"></polyline>
+                                                <line x1="12" y1="3" x2="12" y2="15"></line>
+                                            </svg>
+                                            Import CSV
+                                        </button>
+                                    </div>
+                                    <span class="selection-hint">Drag to select • Ctrl+V to paste</span>
+                                </div>
+                                <table class="embedded-table nested-level" data-array-path="${cellPath}">
+                                    <thead>
+                                        <tr>
+                                            <th class="row-index-header">#</th>
+                                            ${nestedColumns.map(col => `<th>${this.escapeHtml(col)}</th>`).join('')}
+                                            <th class="row-actions-header"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${value.map((item, idx) => this.renderNestedTableRow(item, idx, nestedColumns, cellPath)).join('')}
+                                    </tbody>
+                                </table>
+                                <div class="table-footer">
+                                    <button class="btn-add-row" data-array-path="${cellPath}" data-columns="${columnsJson}" title="Add new row">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <circle cx="12" cy="12" r="10"></circle>
+                                            <line x1="12" y1="8" x2="12" y2="16"></line>
+                                            <line x1="8" y1="12" x2="16" y2="12"></line>
+                                        </svg>
+                                        Add Row
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </td>
+                </tr>
+            `;
+        } else if (type === 'array') {
+
+            // Regular array - show items as a list
+            return `
+                <tr class="nested-expansion-row">
+                    <td colspan="${colSpan + 2}" class="nested-expansion-cell">
+                        <div class="nested-content nested-list">
+                            ${value.map((item, idx) => {
+                const itemPath = `${cellPath}.${idx}`;
+                const itemType = this.getType(item);
+                const isModified = this.modifiedPaths.has(itemPath);
+
+                if (itemType === 'object' || itemType === 'array') {
+                    const preview = itemType === 'array' ? `[${item.length}]` : `{${Object.keys(item).length}}`;
+                    const isExpanded = this.expandedPaths.has(itemPath);
+                    return `
+                                        <div class="nested-list-item">
+                                            <span class="nested-index">[${idx}]</span>
+                                            <span class="nested-preview ${itemType} ${isExpanded ? 'expanded' : ''}" 
+                                                  data-path="${itemPath}">${preview}</span>
+                                        </div>
+                                        ${isExpanded ? `<div class="nested-expanded-content">${this.renderNestedExpansionContent(item, itemPath)}</div>` : ''}
+                                    `;
+                } else {
+                    return `
+                                        <div class="nested-list-item">
+                                            <span class="nested-index">[${idx}]</span>
+                                            <div class="embedded-value-cell editable ${itemType} ${isModified ? 'modified' : ''}" 
+                                                 contenteditable="true" 
+                                                 data-path="${itemPath}"
+                                                 data-type="${itemType}">${this.escapeHtml(this.formatValue(item, itemType))}</div>
+                                        </div>
+                                    `;
+                }
+            }).join('')}
+                        </div>
+                    </td>
+                </tr>
+            `;
+        } else if (type === 'object') {
+            // Object - show key-value pairs
+            return `
+                <tr class="nested-expansion-row">
+                    <td colspan="${colSpan + 2}" class="nested-expansion-cell">
+                        <div class="nested-content nested-object">
+                            ${Object.entries(value).map(([key, val]) => {
+                const itemPath = `${cellPath}.${key}`;
+                const itemType = this.getType(val);
+                const isModified = this.modifiedPaths.has(itemPath);
+
+                if (itemType === 'object' || itemType === 'array') {
+                    const preview = itemType === 'array' ? `[${val.length}]` : `{${Object.keys(val).length}}`;
+                    const isExpanded = this.expandedPaths.has(itemPath);
+                    return `
+                                        <div class="nested-object-item">
+                                            <span class="nested-key">${this.escapeHtml(key)}:</span>
+                                            <span class="nested-preview ${itemType} ${isExpanded ? 'expanded' : ''}" 
+                                                  data-path="${itemPath}">${preview}</span>
+                                        </div>
+                                        ${isExpanded ? `<div class="nested-expanded-content">${this.renderNestedExpansionContent(val, itemPath)}</div>` : ''}
+                                    `;
+                } else {
+                    return `
+                                        <div class="nested-object-item">
+                                            <span class="nested-key">${this.escapeHtml(key)}:</span>
+                                            <div class="embedded-value-cell editable ${itemType} ${isModified ? 'modified' : ''}" 
+                                                 contenteditable="true" 
+                                                 data-path="${itemPath}"
+                                                 data-type="${itemType}">${this.escapeHtml(this.formatValue(val, itemType))}</div>
+                                            <span class="type-badge small ${itemType}">${itemType}</span>
+                                        </div>
+                                    `;
+                }
+            }).join('')}
+                        </div>
+                    </td>
+                </tr>
+            `;
+        }
+
+        return '';
+    }
+
+    renderNestedExpansionContent(value, cellPath) {
+        const type = this.getType(value);
+
+        if (type === 'array' && this.isHomogeneousObjectArray(value)) {
+            const nestedColumns = this.getCommonKeys(value);
+            return `
+                <div class="nested-table-wrapper">
+                    <table class="embedded-table nested-level" data-array-path="${cellPath}">
+                        <thead>
+                            <tr>
+                                <th class="row-index-header">#</th>
+                                ${nestedColumns.map(col => `<th>${this.escapeHtml(col)}</th>`).join('')}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${value.map((item, idx) => this.renderNestedTableRow(item, idx, nestedColumns, cellPath)).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+        } else if (type === 'array') {
+            return `
+                <div class="nested-list">
+                    ${value.map((item, idx) => {
+                const itemPath = `${cellPath}.${idx}`;
+                const itemType = this.getType(item);
+                return `
+                            <div class="nested-list-item">
+                                <span class="nested-index">[${idx}]</span>
+                                <span class="nested-value ${itemType}">${this.escapeHtml(this.formatValue(item, itemType))}</span>
+                            </div>
+                        `;
+            }).join('')}
+                </div>
+            `;
+        } else if (type === 'object') {
+            return `
+                <div class="nested-object">
+                    ${Object.entries(value).map(([key, val]) => {
+                const itemType = this.getType(val);
+                return `
+                            <div class="nested-object-item">
+                                <span class="nested-key">${this.escapeHtml(key)}:</span>
+                                <span class="nested-value ${itemType}">${this.escapeHtml(this.formatValue(val, itemType))}</span>
+                            </div>
+                        `;
+            }).join('')}
+                </div>
+            `;
+        }
+        return '';
+    }
+
+    renderNestedTableRow(item, rowIndex, columns, parentPath) {
+        return `
+            <tr data-row-index="${rowIndex}">
+                <td class="row-index">${rowIndex}</td>
+                ${columns.map(col => {
+            const value = item[col];
+            const type = this.getType(value);
+            const cellPath = `${parentPath}.${rowIndex}.${col}`;
+            const isModified = this.modifiedPaths.has(cellPath);
+            const isExpanded = this.expandedPaths.has(cellPath);
+
+            if (type === 'object' || type === 'array') {
+                const preview = type === 'array' ? `[${value.length}]` : `{${Object.keys(value).length}}`;
+                return `<td class="nested-cell">
+                            <span class="nested-preview ${type} ${isExpanded ? 'expanded' : ''}" 
+                                  data-path="${cellPath}">
+                                <svg class="expand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="9 18 15 12 9 6"></polyline>
+                                </svg>
+                                ${preview}
+                            </span>
                         </td>`;
             } else {
                 const displayValue = this.formatValue(value, type);
                 return `<td>
                             <div class="embedded-value-cell editable ${type} ${isModified ? 'modified' : ''}" 
-                                 contenteditable="true" 
-                                 data-path="${cellPath}" 
-                                 data-type="${type}"
-                                 data-row="${rowIndex}"
-                                 data-col="${colIndex}">${this.escapeHtml(displayValue)}</div>
+                                 contenteditable="true" data-path="${cellPath}" data-type="${type}">${this.escapeHtml(displayValue)}</div>
                         </td>`;
             }
         }).join('')}
                 <td class="row-actions">
-                    <button class="btn-delete-row" data-array-path="${pathStr}" data-row-index="${rowIndex}" title="Delete row">
+                    <button class="btn-delete-row" data-array-path="${parentPath}" data-row-index="${rowIndex}" title="Delete row">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <polyline points="3 6 5 6 21 6"></polyline>
                             <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
@@ -701,6 +1061,8 @@ class JSONTableEditor {
             </tr>
         `;
     }
+
+
 
     attachTableEventListeners(tableRow, path, columns) {
         const pathStr = path.join('.');
@@ -764,12 +1126,15 @@ class JSONTableEditor {
             });
         });
 
-        // Nested object/array clicks
+        // Nested object/array clicks - toggle inline expansion
         tableRow.querySelectorAll('.nested-preview').forEach(preview => {
             preview.addEventListener('click', (e) => {
-                this.toggleExpand(e.target.dataset.path);
+                e.stopPropagation();
+                const nestedPath = e.target.dataset.path;
+                this.toggleExpand(nestedPath);
             });
         });
+
 
         // Add row button
         tableRow.querySelector('.btn-add-row').addEventListener('click', () => {
@@ -1085,7 +1450,91 @@ class JSONTableEditor {
             if (toast.parentNode) toast.parentNode.removeChild(toast);
         }, 3000);
     }
+
+    // Show nested data in a modal
+    showNestedDataModal(pathStr) {
+        const value = this.getValueAtPath(pathStr);
+        if (value === undefined) return;
+
+        // Remove existing modal if any
+        const existingModal = document.querySelector('.nested-modal-overlay');
+        if (existingModal) existingModal.remove();
+
+        const type = this.getType(value);
+        const pathParts = pathStr.split('.');
+        const fieldName = pathParts[pathParts.length - 1];
+
+        const modal = document.createElement('div');
+        modal.className = 'nested-modal-overlay';
+        modal.innerHTML = `
+            <div class="nested-modal">
+                <div class="nested-modal-header">
+                    <h3>
+                        <span class="type-badge ${type}">${type}</span>
+                        ${this.escapeHtml(fieldName)}
+                    </h3>
+                    <button class="btn-close-modal" title="Close">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"></line>
+                            <line x1="6" y1="6" x2="18" y2="18"></line>
+                        </svg>
+                    </button>
+                </div>
+                <div class="nested-modal-content">
+                    <textarea class="nested-json-editor" spellcheck="false">${JSON.stringify(value, null, 2)}</textarea>
+                </div>
+                <div class="nested-modal-footer">
+                    <button class="btn-cancel">Cancel</button>
+                    <button class="btn-save">Save Changes</button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+
+        const closeModal = () => modal.remove();
+        const overlay = modal;
+        const closeBtn = modal.querySelector('.btn-close-modal');
+        const cancelBtn = modal.querySelector('.btn-cancel');
+        const saveBtn = modal.querySelector('.btn-save');
+        const textarea = modal.querySelector('.nested-json-editor');
+
+        // Close on overlay click
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) closeModal();
+        });
+
+        closeBtn.addEventListener('click', closeModal);
+        cancelBtn.addEventListener('click', closeModal);
+
+        // Save changes
+        saveBtn.addEventListener('click', () => {
+            try {
+                const newValue = JSON.parse(textarea.value);
+                this.setValueAtPath(pathStr, newValue);
+                this.modifiedPaths.add(pathStr);
+                this.renderTable();
+                closeModal();
+                this.showToast('Nested data updated', 'success');
+            } catch (error) {
+                this.showToast('Invalid JSON: ' + error.message, 'error');
+            }
+        });
+
+        // Close on Escape
+        const handleEscape = (e) => {
+            if (e.key === 'Escape') {
+                closeModal();
+                document.removeEventListener('keydown', handleEscape);
+            }
+        };
+        document.addEventListener('keydown', handleEscape);
+
+        // Focus textarea
+        textarea.focus();
+    }
 }
+
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
