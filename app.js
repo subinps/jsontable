@@ -8,7 +8,13 @@ class JSONTableEditor {
         this.jsonData = null;
         this.fileName = '';
         this.expandedPaths = new Set();
-        this.modifiedPaths = new Set(); // Track modified cells
+        this.modifiedPaths = new Set();
+
+        // Drag selection state
+        this.isDragging = false;
+        this.dragStartCell = null;
+        this.selectedCells = [];
+        this.currentTablePath = null;
 
         this.initElements();
         this.initEventListeners();
@@ -43,6 +49,28 @@ class JSONTableEditor {
         this.btnCollapseAll.addEventListener('click', () => this.collapseAll());
         this.btnExport.addEventListener('click', () => this.exportJSON());
         this.btnClear.addEventListener('click', () => this.clearData());
+
+        // Global paste handler
+        document.addEventListener('paste', (e) => this.handlePaste(e));
+
+        // Global mouse up to end drag selection
+        document.addEventListener('mouseup', () => {
+            this.isDragging = false;
+        });
+
+        // Click outside to clear selection
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.embedded-table-wrapper')) {
+                this.clearSelection();
+            }
+        });
+
+        // Escape to clear selection
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                this.clearSelection();
+            }
+        });
     }
 
     // File handling
@@ -89,7 +117,8 @@ class JSONTableEditor {
         reader.onload = (e) => {
             try {
                 this.jsonData = JSON.parse(e.target.result);
-                this.modifiedPaths.clear(); // Reset modified tracking
+                this.modifiedPaths.clear();
+                this.clearSelection();
                 this.fileNameEl.textContent = this.fileName;
                 this.fileSizeEl.textContent = fileSize;
                 this.renderTable();
@@ -125,25 +154,352 @@ class JSONTableEditor {
         this.tableContainer.classList.add('hidden');
     }
 
-    // Check if an array is homogeneous (all objects with similar keys)
+    // =====================================
+    // DRAG SELECTION
+    // =====================================
+
+    clearSelection() {
+        this.selectedCells.forEach(cell => cell.classList.remove('selected'));
+        this.selectedCells = [];
+        this.dragStartCell = null;
+        this.isDragging = false;
+    }
+
+    startDragSelection(cell) {
+        this.clearSelection();
+        this.isDragging = true;
+        this.dragStartCell = cell;
+        cell.classList.add('selected');
+        this.selectedCells = [cell];
+
+        const table = cell.closest('.embedded-table');
+        if (table) {
+            this.currentTablePath = table.dataset.arrayPath;
+        }
+    }
+
+    updateDragSelection(endCell) {
+        if (!this.isDragging || !this.dragStartCell) return;
+
+        const table = this.dragStartCell.closest('.embedded-table');
+        if (!table || !table.contains(endCell)) return;
+
+        const tbody = table.querySelector('tbody');
+        const rows = Array.from(tbody.querySelectorAll('tr'));
+
+        const startRow = this.dragStartCell.closest('tr');
+        const endRow = endCell.closest('tr');
+        const startRowIndex = rows.indexOf(startRow);
+        const endRowIndex = rows.indexOf(endRow);
+
+        const startCells = Array.from(startRow.querySelectorAll('.embedded-value-cell'));
+        const endCells = Array.from(endRow.querySelectorAll('.embedded-value-cell'));
+        const startColIndex = startCells.indexOf(this.dragStartCell);
+        const endColIndex = endCells.indexOf(endCell);
+
+        if (startColIndex === -1 || endColIndex === -1) return;
+
+        const minRow = Math.min(startRowIndex, endRowIndex);
+        const maxRow = Math.max(startRowIndex, endRowIndex);
+        const minCol = Math.min(startColIndex, endColIndex);
+        const maxCol = Math.max(startColIndex, endColIndex);
+
+        // Clear previous selection
+        this.selectedCells.forEach(c => c.classList.remove('selected'));
+        this.selectedCells = [];
+
+        // Select range
+        for (let r = minRow; r <= maxRow; r++) {
+            const row = rows[r];
+            const cells = Array.from(row.querySelectorAll('.embedded-value-cell'));
+            for (let c = minCol; c <= maxCol; c++) {
+                if (cells[c]) {
+                    cells[c].classList.add('selected');
+                    this.selectedCells.push(cells[c]);
+                }
+            }
+        }
+    }
+
+    // =====================================
+    // PASTE FUNCTIONALITY
+    // =====================================
+
+    handlePaste(e) {
+        if (this.selectedCells.length === 0) return;
+
+        const activeEl = document.activeElement;
+        if (activeEl && activeEl.isContentEditable && activeEl.classList.contains('embedded-value-cell')) {
+            if (this.selectedCells.length === 1 && this.selectedCells[0] === activeEl) {
+                return; // Let default paste work for single cell editing
+            }
+        }
+
+        e.preventDefault();
+
+        const clipboardData = e.clipboardData || window.clipboardData;
+        const pastedText = clipboardData.getData('text');
+
+        if (!pastedText) return;
+
+        const rows = pastedText.split(/\r?\n/).filter(row => row.trim() !== '');
+        const data = rows.map(row => row.split('\t'));
+
+        if (data.length === 0) return;
+
+        const startCell = this.selectedCells[0];
+        const table = startCell.closest('.embedded-table');
+        if (!table) return;
+
+        const tbody = table.querySelector('tbody');
+        const tableRows = Array.from(tbody.querySelectorAll('tr'));
+        const startRow = startCell.closest('tr');
+        const startRowIndex = tableRows.indexOf(startRow);
+
+        const startRowCells = Array.from(startRow.querySelectorAll('.embedded-value-cell'));
+        const startColIndex = startRowCells.indexOf(startCell);
+
+        let updatedCount = 0;
+
+        for (let r = 0; r < data.length; r++) {
+            const targetRowIndex = startRowIndex + r;
+            if (targetRowIndex >= tableRows.length) break;
+
+            const targetRow = tableRows[targetRowIndex];
+            const targetCells = Array.from(targetRow.querySelectorAll('.embedded-value-cell'));
+
+            for (let c = 0; c < data[r].length; c++) {
+                const targetColIndex = startColIndex + c;
+                if (targetColIndex >= targetCells.length) break;
+
+                const cell = targetCells[targetColIndex];
+                const path = cell.dataset.path;
+                const type = cell.dataset.type;
+                let newValue = data[r][c].trim();
+
+                try {
+                    if (type === 'number') {
+                        const num = parseFloat(newValue);
+                        if (!isNaN(num)) newValue = num;
+                        else continue;
+                    } else if (type === 'boolean') {
+                        if (newValue.toLowerCase() === 'true') newValue = true;
+                        else if (newValue.toLowerCase() === 'false') newValue = false;
+                        else continue;
+                    } else if (type === 'null' && newValue.toLowerCase() === 'null') {
+                        newValue = null;
+                    }
+
+                    this.setValueAtPath(path, newValue);
+                    this.modifiedPaths.add(path);
+                    cell.textContent = this.formatValue(newValue, type);
+                    cell.classList.add('modified');
+                    updatedCount++;
+                } catch (error) {
+                    console.warn(`Failed to paste at ${path}:`, error);
+                }
+            }
+        }
+
+        this.clearSelection();
+        if (updatedCount > 0) {
+            this.showToast(`Pasted ${updatedCount} cells`, 'success');
+        }
+    }
+
+    // =====================================
+    // CSV EXPORT/IMPORT
+    // =====================================
+
+    exportTableAsCSV(arrayPath, columns) {
+        const arr = this.getValueAtPath(arrayPath);
+        if (!Array.isArray(arr)) return;
+
+        // Build CSV
+        const csvRows = [];
+
+        // Header row
+        csvRows.push(columns.join(','));
+
+        // Data rows
+        arr.forEach(item => {
+            const row = columns.map(col => {
+                const value = item[col];
+                const type = this.getType(value);
+
+                if (type === 'object' || type === 'array') {
+                    return `"${JSON.stringify(value).replace(/"/g, '""')}"`;
+                } else if (type === 'string') {
+                    // Escape quotes and wrap in quotes if contains comma
+                    const escaped = String(value).replace(/"/g, '""');
+                    return value.includes(',') || value.includes('\n') ? `"${escaped}"` : escaped;
+                } else {
+                    return this.formatValue(value, type);
+                }
+            });
+            csvRows.push(row.join(','));
+        });
+
+        const csvContent = csvRows.join('\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement('a');
+        a.href = url;
+        const baseName = this.fileName.replace('.json', '');
+        const tableName = arrayPath.split('.').pop() || 'table';
+        a.download = `${baseName}_${tableName}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        this.showToast(`Exported ${arr.length} rows to CSV`, 'success');
+    }
+
+    importCSVToTable(arrayPath, columns, file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const csvText = e.target.result;
+                const lines = csvText.split(/\r?\n/).filter(line => line.trim());
+
+                if (lines.length < 2) {
+                    this.showToast('CSV file is empty or has no data rows', 'error');
+                    return;
+                }
+
+                // Parse header
+                const header = this.parseCSVRow(lines[0]);
+
+                // Validate columns match
+                const missingCols = columns.filter(col => !header.includes(col));
+                if (missingCols.length > 0) {
+                    this.showToast(`Missing columns: ${missingCols.join(', ')}`, 'error');
+                    return;
+                }
+
+                // Get the array
+                const arr = this.getValueAtPath(arrayPath);
+                if (!Array.isArray(arr)) return;
+
+                // Parse data rows and update array
+                const newData = [];
+                for (let i = 1; i < lines.length; i++) {
+                    const values = this.parseCSVRow(lines[i]);
+                    if (values.length === 0) continue;
+
+                    const item = {};
+                    header.forEach((col, idx) => {
+                        if (columns.includes(col)) {
+                            let value = values[idx] || '';
+
+                            // Try to infer type from existing data
+                            const existingValue = arr.length > 0 ? arr[0][col] : '';
+                            const type = this.getType(existingValue);
+
+                            if (type === 'number') {
+                                const num = parseFloat(value);
+                                value = isNaN(num) ? 0 : num;
+                            } else if (type === 'boolean') {
+                                value = value.toLowerCase() === 'true';
+                            } else if (type === 'null' && value.toLowerCase() === 'null') {
+                                value = null;
+                            }
+
+                            item[col] = value;
+                        }
+                    });
+                    newData.push(item);
+                }
+
+                // Replace array data
+                arr.length = 0;
+                newData.forEach(item => arr.push(item));
+
+                // Mark all as modified
+                newData.forEach((item, rowIndex) => {
+                    columns.forEach(col => {
+                        this.modifiedPaths.add(`${arrayPath}.${rowIndex}.${col}`);
+                    });
+                });
+
+                this.renderTable();
+                // Re-expand the path
+                this.expandedPaths.add(arrayPath);
+                this.renderTable();
+
+                this.showToast(`Imported ${newData.length} rows from CSV`, 'success');
+            } catch (error) {
+                this.showToast('Error parsing CSV: ' + error.message, 'error');
+            }
+        };
+        reader.readAsText(file);
+    }
+
+    parseCSVRow(line) {
+        const result = [];
+        let current = '';
+        let inQuotes = false;
+
+        for (let i = 0; i < line.length; i++) {
+            const char = line[i];
+
+            if (inQuotes) {
+                if (char === '"') {
+                    if (line[i + 1] === '"') {
+                        current += '"';
+                        i++;
+                    } else {
+                        inQuotes = false;
+                    }
+                } else {
+                    current += char;
+                }
+            } else {
+                if (char === '"') {
+                    inQuotes = true;
+                } else if (char === ',') {
+                    result.push(current.trim());
+                    current = '';
+                } else {
+                    current += char;
+                }
+            }
+        }
+        result.push(current.trim());
+
+        return result;
+    }
+
+    triggerCSVImport(arrayPath, columns) {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.csv';
+        input.onchange = (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                this.importCSVToTable(arrayPath, columns, file);
+            }
+        };
+        input.click();
+    }
+
+    // =====================================
+    // TABLE RENDERING
+    // =====================================
+
     isHomogeneousObjectArray(arr) {
         if (!Array.isArray(arr) || arr.length < 1) return false;
 
-        // Check if all items are objects (not arrays, not null)
         const allObjects = arr.every(item =>
-            item !== null &&
-            typeof item === 'object' &&
-            !Array.isArray(item)
+            item !== null && typeof item === 'object' && !Array.isArray(item)
         );
 
         if (!allObjects) return false;
-
         if (arr.length === 1) return true;
 
-        // Get keys from all objects
         const keySets = arr.map(obj => Object.keys(obj).sort().join(','));
-
-        // Check if at least 70% of objects have similar structure
         const keyCount = {};
         keySets.forEach(keys => {
             keyCount[keys] = (keyCount[keys] || 0) + 1;
@@ -153,7 +509,6 @@ class JSONTableEditor {
         return maxCount >= arr.length * 0.7;
     }
 
-    // Get common keys from homogeneous array
     getCommonKeys(arr) {
         const keyCount = {};
         arr.forEach(obj => {
@@ -164,14 +519,12 @@ class JSONTableEditor {
             }
         });
 
-        // Return keys that appear in at least 50% of objects (or at least 1 for small arrays)
         const threshold = Math.max(1, arr.length * 0.5);
         return Object.keys(keyCount)
             .filter(key => keyCount[key] >= threshold)
             .sort((a, b) => keyCount[b] - keyCount[a]);
     }
 
-    // Table rendering
     renderTable() {
         this.tableBody.innerHTML = '';
         this.renderValue(this.jsonData, '', [], 0);
@@ -179,7 +532,6 @@ class JSONTableEditor {
 
     renderValue(value, key, path, level) {
         const type = this.getType(value);
-        const pathStr = path.join('.');
 
         if (type === 'array' && this.isHomogeneousObjectArray(value)) {
             this.renderArrayAsTable(value, key, path, level);
@@ -190,13 +542,11 @@ class JSONTableEditor {
         }
     }
 
-    // Render homogeneous array as an embedded table
     renderArrayAsTable(arr, key, path, level) {
         const pathStr = path.join('.');
         const isExpanded = this.expandedPaths.has(pathStr);
         const columns = this.getCommonKeys(arr);
 
-        // Header row with expand toggle
         const headerRow = document.createElement('tr');
         headerRow.className = `row-level-${Math.min(level, 4)}`;
         headerRow.dataset.path = pathStr;
@@ -230,15 +580,13 @@ class JSONTableEditor {
             </td>
         `;
 
-        const toggleBtn = headerRow.querySelector('.toggle-btn');
-        toggleBtn.addEventListener('click', (e) => {
+        headerRow.querySelector('.toggle-btn').addEventListener('click', (e) => {
             e.stopPropagation();
             this.toggleExpand(pathStr);
         });
 
         this.tableBody.appendChild(headerRow);
 
-        // Render embedded table when expanded
         if (isExpanded) {
             const tableRow = document.createElement('tr');
             tableRow.className = `row-level-${Math.min(level + 1, 4)} embedded-table-row`;
@@ -252,12 +600,35 @@ class JSONTableEditor {
             embeddedContainer.innerHTML = `
                 <div class="embedded-indent">${this.getIndent(level + 1)}</div>
                 <div class="embedded-table-wrapper">
+                    <div class="table-toolbar">
+                        <div class="toolbar-left">
+                            <button class="btn-csv btn-export-csv" data-array-path="${pathStr}" title="Export to CSV for Excel editing">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                    <polyline points="7 10 12 15 17 10"></polyline>
+                                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                                </svg>
+                                Export CSV
+                            </button>
+                            <button class="btn-csv btn-import-csv" data-array-path="${pathStr}" title="Import from CSV to replace data">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                    <polyline points="17 8 12 3 7 8"></polyline>
+                                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                                </svg>
+                                Import CSV
+                            </button>
+                        </div>
+                        <span class="selection-hint">
+                            Drag to select • Ctrl+V to paste
+                        </span>
+                    </div>
                     <table class="embedded-table" data-array-path="${pathStr}">
                         <thead>
                             <tr>
                                 <th class="row-index-header">#</th>
                                 ${columns.map(col => `<th>${this.escapeHtml(col)}</th>`).join('')}
-                                <th class="row-actions-header">Actions</th>
+                                <th class="row-actions-header"></th>
                             </tr>
                         </thead>
                         <tbody>
@@ -281,7 +652,6 @@ class JSONTableEditor {
             tableRow.appendChild(tableCell);
             this.tableBody.appendChild(tableRow);
 
-            // Attach event listeners
             this.attachTableEventListeners(tableRow, path, columns);
         }
     }
@@ -293,7 +663,7 @@ class JSONTableEditor {
         return `
             <tr data-row-index="${rowIndex}" class="${isNewRow ? 'new-row' : ''}">
                 <td class="row-index">${rowIndex}</td>
-                ${columns.map(col => {
+                ${columns.map((col, colIndex) => {
             const value = item[col];
             const type = this.getType(value);
             const cellPath = [...path, rowIndex, col].join('.');
@@ -314,7 +684,9 @@ class JSONTableEditor {
                             <div class="embedded-value-cell editable ${type} ${isModified ? 'modified' : ''}" 
                                  contenteditable="true" 
                                  data-path="${cellPath}" 
-                                 data-type="${type}">${this.escapeHtml(displayValue)}</div>
+                                 data-type="${type}"
+                                 data-row="${rowIndex}"
+                                 data-col="${colIndex}">${this.escapeHtml(displayValue)}</div>
                         </td>`;
             }
         }).join('')}
@@ -333,24 +705,60 @@ class JSONTableEditor {
     attachTableEventListeners(tableRow, path, columns) {
         const pathStr = path.join('.');
 
-        // Editable cells
+        // CSV buttons
+        const exportBtn = tableRow.querySelector('.btn-export-csv');
+        const importBtn = tableRow.querySelector('.btn-import-csv');
+
+        exportBtn.addEventListener('click', () => {
+            this.exportTableAsCSV(pathStr, columns);
+        });
+
+        importBtn.addEventListener('click', () => {
+            this.triggerCSVImport(pathStr, columns);
+        });
+
+        // Editable cells with drag selection
         tableRow.querySelectorAll('.embedded-value-cell.editable').forEach(cell => {
+            // Mouse down - start drag selection
+            cell.addEventListener('mousedown', (e) => {
+                if (e.button !== 0) return; // Only left click
+                e.preventDefault();
+                this.startDragSelection(cell);
+            });
+
+            // Mouse enter during drag
+            cell.addEventListener('mouseenter', (e) => {
+                if (this.isDragging) {
+                    this.updateDragSelection(cell);
+                }
+            });
+
+            // Double click to edit
+            cell.addEventListener('dblclick', (e) => {
+                this.clearSelection();
+                cell.focus();
+                const range = document.createRange();
+                range.selectNodeContents(cell);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+            });
+
             cell.addEventListener('blur', (e) => this.handleValueEdit(e));
             cell.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
                     e.target.blur();
                 }
-                // Tab navigation within table
                 if (e.key === 'Tab') {
-                    const cells = Array.from(tableRow.querySelectorAll('.embedded-value-cell.editable'));
-                    const currentIndex = cells.indexOf(e.target);
-                    if (!e.shiftKey && currentIndex < cells.length - 1) {
+                    const allCells = Array.from(tableRow.querySelectorAll('.embedded-value-cell.editable'));
+                    const currentIndex = allCells.indexOf(e.target);
+                    if (!e.shiftKey && currentIndex < allCells.length - 1) {
                         e.preventDefault();
-                        cells[currentIndex + 1].focus();
+                        allCells[currentIndex + 1].focus();
                     } else if (e.shiftKey && currentIndex > 0) {
                         e.preventDefault();
-                        cells[currentIndex - 1].focus();
+                        allCells[currentIndex - 1].focus();
                     }
                 }
             });
@@ -359,51 +767,40 @@ class JSONTableEditor {
         // Nested object/array clicks
         tableRow.querySelectorAll('.nested-preview').forEach(preview => {
             preview.addEventListener('click', (e) => {
-                const nestedPath = e.target.dataset.path;
-                this.toggleExpand(nestedPath);
+                this.toggleExpand(e.target.dataset.path);
             });
         });
 
         // Add row button
-        tableRow.querySelector('.btn-add-row').addEventListener('click', (e) => {
+        tableRow.querySelector('.btn-add-row').addEventListener('click', () => {
             this.addRow(pathStr, columns);
         });
 
         // Delete row buttons
         tableRow.querySelectorAll('.btn-delete-row').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const rowIndex = parseInt(btn.dataset.rowIndex);
-                this.deleteRow(pathStr, rowIndex);
+            btn.addEventListener('click', () => {
+                this.deleteRow(pathStr, parseInt(btn.dataset.rowIndex));
             });
         });
     }
 
-    // Add a new row to the array
     addRow(arrayPath, columns) {
         const arr = this.getValueAtPath(arrayPath);
         if (!Array.isArray(arr)) return;
 
-        // Create a new object with empty values for each column
         const newItem = {};
         columns.forEach(col => {
-            // Try to infer type from existing items
             const existingValue = arr.length > 0 ? arr[0][col] : '';
             const type = this.getType(existingValue);
 
-            if (type === 'number') {
-                newItem[col] = 0;
-            } else if (type === 'boolean') {
-                newItem[col] = false;
-            } else if (type === 'null') {
-                newItem[col] = null;
-            } else {
-                newItem[col] = '';
-            }
+            if (type === 'number') newItem[col] = 0;
+            else if (type === 'boolean') newItem[col] = false;
+            else if (type === 'null') newItem[col] = null;
+            else newItem[col] = '';
         });
 
         arr.push(newItem);
 
-        // Mark the new row as modified
         const newRowIndex = arr.length - 1;
         this.modifiedPaths.add(`${arrayPath}.${newRowIndex}.__new__`);
         columns.forEach(col => {
@@ -414,14 +811,12 @@ class JSONTableEditor {
         this.showToast(`Row added`, 'success');
     }
 
-    // Delete a row from the array
     deleteRow(arrayPath, rowIndex) {
         const arr = this.getValueAtPath(arrayPath);
         if (!Array.isArray(arr) || rowIndex < 0 || rowIndex >= arr.length) return;
 
         arr.splice(rowIndex, 1);
 
-        // Update modified paths (remove old ones, they'll be stale)
         const newModifiedPaths = new Set();
         this.modifiedPaths.forEach(p => {
             if (!p.startsWith(arrayPath + '.')) {
@@ -465,8 +860,7 @@ class JSONTableEditor {
             </td>
         `;
 
-        const toggleBtn = row.querySelector('.toggle-btn');
-        toggleBtn.addEventListener('click', (e) => {
+        row.querySelector('.toggle-btn').addEventListener('click', (e) => {
             e.stopPropagation();
             this.toggleExpand(pathStr);
         });
@@ -475,8 +869,7 @@ class JSONTableEditor {
 
         if (isExpanded) {
             entries.forEach(([k, v]) => {
-                const childPath = [...path, k];
-                this.renderValue(v, k, childPath, level + 1);
+                this.renderValue(v, k, [...path, k], level + 1);
             });
         }
     }
@@ -549,45 +942,30 @@ class JSONTableEditor {
         return div.innerHTML;
     }
 
-    // Value editing
     handleValueEdit(e) {
         const cell = e.target;
         const path = cell.dataset.path;
         const type = cell.dataset.type;
         let newValue = cell.textContent.trim();
 
-        // Parse the value based on original type
         try {
             if (type === 'number') {
                 const num = parseFloat(newValue);
-                if (isNaN(num)) {
-                    throw new Error('Invalid number');
-                }
+                if (isNaN(num)) throw new Error('Invalid number');
                 newValue = num;
             } else if (type === 'boolean') {
-                if (newValue.toLowerCase() === 'true') {
-                    newValue = true;
-                } else if (newValue.toLowerCase() === 'false') {
-                    newValue = false;
-                } else {
-                    throw new Error('Invalid boolean');
-                }
-            } else if (type === 'null') {
-                if (newValue.toLowerCase() === 'null') {
-                    newValue = null;
-                }
-                // Allow converting null to string
+                if (newValue.toLowerCase() === 'true') newValue = true;
+                else if (newValue.toLowerCase() === 'false') newValue = false;
+                else throw new Error('Invalid boolean');
+            } else if (type === 'null' && newValue.toLowerCase() === 'null') {
+                newValue = null;
             }
-            // String values stay as strings
 
             this.setValueAtPath(path, newValue);
-
-            // Mark as modified and add visual indicator
             this.modifiedPaths.add(path);
             cell.classList.add('modified');
 
         } catch (error) {
-            // Revert to original value
             const originalValue = this.getValueAtPath(path);
             cell.textContent = this.formatValue(originalValue, type);
             this.showToast('Invalid value: ' + error.message, 'error');
@@ -624,7 +1002,6 @@ class JSONTableEditor {
         }
     }
 
-    // Expand/Collapse
     toggleExpand(pathStr) {
         if (this.expandedPaths.has(pathStr)) {
             this.expandedPaths.delete(pathStr);
@@ -658,7 +1035,6 @@ class JSONTableEditor {
         this.showToast('All sections collapsed', 'info');
     }
 
-    // Export
     exportJSON() {
         if (!this.jsonData) {
             this.showToast('No data to export', 'error');
@@ -680,19 +1056,18 @@ class JSONTableEditor {
         this.showToast('JSON exported successfully', 'success');
     }
 
-    // Clear
     clearData() {
         this.jsonData = null;
         this.fileName = '';
         this.expandedPaths.clear();
         this.modifiedPaths.clear();
+        this.clearSelection();
         this.tableBody.innerHTML = '';
         this.fileInput.value = '';
         this.hideUI();
         this.showToast('Data cleared', 'info');
     }
 
-    // Toast notifications (only for important actions, not value updates)
     showToast(message, type = 'info') {
         const toast = document.createElement('div');
         toast.className = `toast ${type}`;
@@ -706,16 +1081,13 @@ class JSONTableEditor {
         toast.innerHTML = `${icons[type]}<span>${message}</span>`;
         this.toastContainer.appendChild(toast);
 
-        // Remove after animation
         setTimeout(() => {
-            if (toast.parentNode) {
-                toast.parentNode.removeChild(toast);
-            }
+            if (toast.parentNode) toast.parentNode.removeChild(toast);
         }, 3000);
     }
 }
 
-// Initialize the app
+// Initialize
 document.addEventListener('DOMContentLoaded', () => {
     window.jsonEditor = new JSONTableEditor();
 });

@@ -95,4 +95,3 @@ Contributions are welcome! Feel free to:
 
 ---
 
-Made with ❤️ for JSON lovers
